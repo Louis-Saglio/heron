@@ -1,0 +1,9 @@
+{
+	"name": "heron",
+	"version": "0.0.1",
+	"label": "Heron",
+	"description": "Heron, an AI for 0 A.D. built on mathematical models of the game (github.com/Louis-Saglio/heron).",
+	"dependencies": [
+		"0ad=0.28.0"
+	]
+}

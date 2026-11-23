@@ -1,0 +1,7 @@
+{
+	"name": "heron-harness",
+	"version": "0.1.0",
+	"label": "Heron test harness",
+	"description": "Headless-match harness for Heron development (tools/run.sh): statistics at game end, map snapshots, time limit. Tooling only.",
+	"dependencies": ["0ad=0.28.0"]
+}

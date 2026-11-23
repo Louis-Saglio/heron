@@ -1,0 +1,7 @@
+{
+	"name": "Heron",
+	"description": "Heron, an AI for 0 A.D. built on mathematical models of the game (github.com/Louis-Saglio/heron).",
+	"constructor": "HeronBot",
+	"filename": "_heron.js",
+	"useShared": true
+}
