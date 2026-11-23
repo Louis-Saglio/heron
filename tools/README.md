@@ -13,6 +13,8 @@ still mention a few Strategos tools not brought over (`identity.py`,
 | `hosts.json` | match hosts: ssh name, slot count, determinism verification, calibration |
 | `analyze.py` | one-line-per-match summary of a batch |
 | `check_bot.py` | bot code rules: every JS file parses; no comment except a reference to an existing section of the specification, `// spec FILE §N` |
+| `lp_economy.py` | offline prototype of the economic program (spec/economy.md §3-§6): builds the time-indexed linear program from a `[STATE]` and the game data (`gamedata/zad.py`, from Strategos), solves it with HiGHS; its narrower scope is listed in its docstring |
+| `lp_experiments.py` | the measurements of spec §8: size, time, branch and bound on the phase, integrality gap (`--all-integer S`), first decisions, prices, stability under small changes; run with `tools/.venv/bin/python` (venv: `python3 -m venv tools/.venv && tools/.venv/bin/pip install highspy numpy`) |
 | `telemetry.py` | read the bot's tagged lines from a match's `stdout.log`, joining the parts of values too long for the engine's print buffer; `--summary` for STATE |
 
 ## The STATE line
