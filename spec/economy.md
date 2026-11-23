@@ -1,10 +1,12 @@
 # Economy
 
-The economic model predicts how fast resources come in, when the items of a
-plan are obtained, what each resource is worth, and what every economic
-decision gains or costs, all in seconds. It decides nothing: the plan comes
-from a policy, and the decisions it values are taken by the schedule
-(README, "The schedule is the allocation").
+The economic model computes, for a plan given by a policy, the economy that
+obtains it best: how fast resources come in, when each item is obtained,
+what each resource is worth at each moment, and what every economic
+decision gains or costs, all in seconds. The whole economy is one linear
+program over time; its dual values are the prices. The model decides
+nothing about what to want: the plan, its values and the time preference
+come from a policy (README, "The common currency").
 
 Engine paths are relative to `binaries/data/mods/public/simulation/` at tag
 v0.28.0, abbreviated `sim/`. Every number below is read from the game data
@@ -23,6 +25,8 @@ at runtime; the values quoted are those of the templates, for the examples.
 | $v_g$ | walk speed, m/s | `UnitMotion/WalkSpeed`, technologies applied |
 | $d(s)$ | distance from $s$ to the nearest own dropsite accepting its resource | `UnitAI.FindNearestDropsite`: obstruction edge distance from the gatherer's position |
 | $R_k$ | stock | |
+| $p$, $t_p$, $\Delta_p$ | a period of the time grid, its start, its length | §4 |
+| $\tau$, $v_i$ | the policy's time preference and the value of item $i$ | README |
 
 ## 2. The gather cycle
 
@@ -59,213 +63,249 @@ Two consequences the rest of the model uses:
 - A gatherer that starts on a resource of another kind drops what it
   carries (`ResourceGatherer.StartGathering`): switching costs the load.
 
-## 3. Fronts and supply curves
+## 3. Fronts and layers
 
-A **front** $f$ is a dropsite $D$ and a resource $k$, with the supplies of $k$
-whose nearest accepting dropsite is $D$ (the engine sends every gatherer of
-those supplies there). Each supply offers $M_s$ places. Ranked by the rate
-they give, the places of a front form a decreasing sequence of marginal
-rates, so the front's flow $F_f(n)$ for $n$ gatherers is concave. Merging
-the fronts of a resource gives its **supply curve** $F_k(n)$: the flow of
-$n$ gatherers placed on the best places.
+A **front** is a dropsite $D$ and a resource $k$, with the supplies of $k$
+whose nearest accepting dropsite is $D$: the engine sends every gatherer of
+those supplies there. Ranked by $d(s)$, the supplies of a front are cut
+into **layers**: consecutive supplies whose rates differ by at most a
+band width. A layer $\ell$ has an amount $A_\ell = \sum A_s$, a number of
+places $M_\ell = \sum M_s$, and for each group $g$ a rate $r_{g,\ell}$, the
+cycle rate at the layer's mean distance. The band width is a computing
+budget: it bounds the error on any rate by the band width itself.
 
-**Depletion.** A front is used from the dropsite outward. Its supplies,
-ranked by $d(s)$, give the distance at which the front stands after an
-amount $Q$ has been taken from it:
+- **Depletion** is the amount of each layer running out. Nothing imposes
+  an order: the program empties the near layers first because they pay
+  more, and moves to the far ones when it must.
+- **Fields** are infinite. A field's $M = 5$ places
+  (`sim/templates/template_structure_resource_field.xml`) are 5 layers, the
+  $j$-th at gather rate $\gamma\rho^{\,j-1}$ ($\rho = 0.9$): the marginal
+  gatherer of $\varphi$ (§2).
+- **A dropsite** at a site $q$ gives every supply nearer to $q$ than to its
+  present dropsite a second layer membership, at its new distance; the two
+  layers share the supply's amount. This is the whole effect of a dropsite.
 
-$$d_f(Q) = d(s_j) \quad\text{for the first } j \text{ with } \sum_{i \le j} A_{s_i} > Q$$
+## 4. The economy as a linear program
 
-so that the front's rate falls as it is worked, $dQ/dt = F_f(n, d_f(Q))$, and
-a front is exhausted when $Q$ reaches its total amount. Fields have
-$A_s = \infty$ and do not move.
+**Time grid.** Periods $p = 0 \dots P-1$, from $t_0 = 0$ (now), short near
+now and longer further ahead. The grid is a computing budget: an item's
+time is known to within the length of its period. The grid ends at $t_P$
+with $e^{-t_P/\tau}$ below the accuracy wanted on $G$: what lies beyond
+weighs less than that.
 
-**A new dropsite** at $p$ moves to it every supply nearer to $p$ than to its
-present dropsite, with its new $d(s)$; the fronts are rebuilt. This is the
-whole effect of a dropsite.
+**Items.** The plan's items (README), the standing demand, and the
+**options**: every economic means of obtaining them, of value 0 —
+a batch of $b$ workers at a building, a house, a dropsite at a site, a
+field, a technology, a production building. An item $i$ has a cost vector
+$c_i$, a population $\pi_i$ (`Cost`), the building kind it is made at or its
+builders, a duration $d_i$, and requirements:
 
-## 4. The forecast of a plan
+- a batch of $b$ units: $d = t_1\, b^{\beta}\, \mu$, with $t_1$ the unit's
+  `Cost/BuildTime`, $\beta$ the building's `Trainer/BatchTimeModifier`
+  (0.8 at a civic centre, 1 if absent) and $\mu$ its
+  `TrainCostMultiplier/time` (`sim/components/Trainer.js`,
+  `GetBatchTime`); its population is reserved when it starts
+  (`TryReservePopulationSlots`);
+- a technology: `researchTime` × the building's `TechCostMultiplier/time`
+  (`sim/components/TechnologyManager.js`);
+- a building with a crew of $n$ builders of rate $a$: $d = B / (a\, n^{m})$,
+  with $B$ its `Cost/BuildTime` and $m$ the foundation's
+  `BuildTimeModifier` (0.7, `sim/templates/special/filter/foundation.xml`;
+  `sim/components/Foundation.js`, `CalculateBuildMultiplier`), and a
+  labour of $n\,d = B\, n^{1-m}/a$ worker-seconds; the crew is chosen as
+  in §6.
 
-A **plan** $P = (p_1, \dots, p_m)$ is an ordered list of items. An item is a
-unit batch, a building, a technology or a barter deal, with:
+**Variables** (all $\ge 0$): $x_{g,\ell,p}$ workers of group $g$ on layer
+$\ell$ during period $p$; $y_{i,p}$ the number of item $i$ started in period
+$p$; $z_{jk,n,p}$ the $n$-th barter deal of the period selling $j$ for $k$;
+$S_{k,p}$ the stock at $t_p$. The number of $i$ done by $t_p$ is the linear
+expression $Y_i(p) = \sum_{p' :\, t_{p'} + d_i \le t_p} y_{i,p'}$.
 
-- its cost vector $c_i$ and population $\pi_i$ (`Cost`);
-- where it is made and for how long:
-  - a batch of $b$ units in a building:
-    $t = t_1\, b^{\beta}\, \mu$, with $t_1$ the unit's `Cost/BuildTime`, $\beta$
-    the building's `Trainer/BatchTimeModifier` (0.8 at a civic centre, 1 if
-    absent) and $\mu$ its `TrainCostMultiplier/time`
-    (`sim/components/Trainer.js`, `GetBatchTime`);
-  - a technology: `researchTime` × the building's `TechCostMultiplier/time`
-    (`sim/components/TechnologyManager.js`);
-  - a building with $n$ builders of rate $a$:
-    $t = B / (a\, n^{m})$, with $B$ its `Cost/BuildTime` and $m$ the
-    foundation's `BuildTimeModifier` (0.7, `sim/templates/special/filter/foundation.xml`;
-    `sim/components/Foundation.js`, `CalculateBuildMultiplier`), plus the
-    builders' walk to the site;
-- its effect when done: units added (after their walk to their work),
-  a building added (fronts, population capacity, a new production queue),
-  a modification applied ($\gamma$, $C$, $v$...).
+**Constraints**, for every period:
 
-The forecast plays the plan forward as a continuous flow of labour, from
-event to event (an item starts or ends, a front is exhausted):
+| | |
+|---|---|
+| stock | $S_{k,p+1} = S_{k,p} + \Delta_p\big(\sum_{g,\ell \in k} r_{g,\ell}\, x_{g,\ell,p} + \theta_k\big) + \text{barter} - \sum_i c_{i,k}\, y_{i,p}$, $S_{k,0} = R_k$; $\theta_k$ the trickle (`ResourceTrickle`) |
+| labour | $\sum_\ell x_{g,\ell,p} + (\text{builders of } g \text{ in } p) \le N_g + \sum_{i \text{ trains } g} b_i\, Y_i(p)$ |
+| places | $\sum_g x_{g,\ell,p} \le M_\ell$, or $M_\ell\, Y_D(p)$ for a layer of a dropsite $D$ not yet built, $Y_F(p)$ for a place of fields $F$ |
+| amounts | $\sum_p \Delta_p \sum_g r_{g,\ell}\, x_{g,\ell,p} \le A_\ell$, and for a supply in two layers, the sum over both $\le$ its amount |
+| queues | $\sum_{i \text{ made at } q} d_i\, y_{i,p} \le \Delta_p\,\big(n_q + \sum_{i \text{ builds } q} Y_i(p)\big)$ for each building kind $q$ |
+| population | $\text{pop} + \sum_i \pi_i \sum_{p' \le p} y_{i,p'} \le \text{cap} + \sum_{h} \text{bonus}_h\, Y_h(p)$ |
+| requirements | $\sum_{p' \le p} y_{i,p'} \le U_i\, Y_r(p)$ for an item $i$ that requires $r$ (a phase, a technology, a building), $U_i$ the most of $i$ the plan can use |
+| technologies | a technology $T$ that changes the rate of $g$ on $\ell$ from $r$ to $r'$ (its `modifications` on $\gamma$, $C$ or $v$, through §2) adds an output $e_{T,g,\ell,p} \le (r' - r)\, x_{g,\ell,p}$ and $\le (r' - r)\, M_\ell\, Y_T(p)$ |
+| barter | the deals of a period are bounded by $Y_{\text{market}}(p)$ (none before a market) and priced in §5 |
+| plan | $\sum_p y_{i,p} \le 1$ for a listed item (or the count wanted) |
 
-1. **Items start in plan order of priority.** An item starts as soon as the
-   stock, less the cost of every earlier item not yet started, covers its
-   cost, its building or builders are free, and the population has room. A
-   later item may start first only if it delays no earlier one.
-2. **Labour goes to the earliest items.** Between two events, the workers
-   are split between resources to cover, as early as possible, the deficit
-   of the first item still short of resources, then of the next. With
-   concave supply curves and a few unit groups this is a small linear
-   program (groups × resources, over the places of the fronts), solved
-   exactly at each event.
-3. **Done items change the state** for the rest of the forecast.
+**Objective.** Maximise the plan's worth
 
-The forecast gives the time $T_i$ each item is obtained, the schedule (what
-starts when, with which workers), and $J = \sum_i T_i$. With the plan order
-fixed, rule 2 is optimal: each item is obtained as early as the earlier
-ones allow.
+$$G = \sum_i v_i \sum_p y_{i,p}\, \tau\, e^{-(t_p + d_i)/\tau}$$
+
+(options have $v_i = 0$; the standing demand has a value per unit and no
+bound). Every constraint and the objective are linear: this is a linear
+program, and its optimum is exact for the problem it states.
+
+**What this gives.**
+
+- The optimal value $G^*$ is concave in the stock, the amounts, the places
+  and the workforce (they are the right-hand sides of the program), and
+  non-decreasing and continuous in these and in the rates. One more
+  resource never makes the plan worse, and a small change of the state
+  makes a small change of $G^*$: the stability AGENTS.md asks for is a
+  property of the model, not a rule added to it.
+- The solution is a schedule: what starts in each period, with which
+  workers on which layers. Its first period is what to do now (§7).
 
 ## 5. Prices
 
-$$\lambda_k = -\frac{\partial J}{\partial R_k} \ \ \text{(s per unit)}, \qquad \lambda_{\text{pop}},\ \lambda_{\text{queue}} \text{ likewise for a free population place and a free production queue.}$$
+The dual values of the program are the prices of everything scarce:
 
-They are the dual values of the linear programs of §4, summed over the
-segments of the forecast (or, to check them, the difference of two
-forecasts with one load more of $k$).
+| Dual of | Price | Meaning |
+|---|---|---|
+| stock of $k$ at $p$ | $\lambda_k(p)$, s per unit | what one more unit of $k$ at $t_p$ adds to $G$ |
+| labour of $g$ at $p$ | $w_g(p)$, s per worker-second | what one second of a worker's time is worth: the cost of taking it off work to build, walk or fight |
+| places of $\ell$ at $p$ | rent of $\ell$ | what a place on $\ell$ is worth beyond the worst place in use: the value of being near a dropsite |
+| queues of $q$ at $p$ | $\kappa_q(p)$ | what a free second of a production queue is worth |
+| population at $p$ | $\lambda_{\text{pop}}(p)$ | what a free population place is worth |
 
-- $\lambda_k = 0$ when no item waits for $k$. A stock nobody needs is worth
-  nothing, and when every price is 0 the plan is limited by queues or
-  population, not by gathering: $\lambda_{\text{queue}}$ or
+- A price is 0 when its constraint has slack: a stock nobody needs is
+  worth nothing, a queue that idles is worth nothing. When every resource
+  price is 0, the plan is limited by queues or population, and $\kappa$ or
   $\lambda_{\text{pop}}$ says which.
-- With one item waiting and identical workers,
-  $\lambda_k = 1 / (N\, r_k)$, with $r_k$ the marginal rate on $k$: a
-  resource is worth the labour its last unit costs.
+- With one item waiting, identical workers and a long $\tau$,
+  $\lambda_k = 1/(N\, r_k)$ with $r_k$ the marginal rate on $k$: a resource
+  is worth the labour its last unit costs.
 
-Example: 20 women must gather 500 food and 300 wood for one item, at
-0.4 food/s on fields and 0.61 wood/s. The optimum puts 14.4 on food and
-5.6 on wood, and the item is obtained after
+Example: 20 women must gather 500 food and 300 wood for one item ($v = 1$,
+long $\tau$), at 0.4 food/s on fields and 0.61 wood/s. The optimum puts
+14.4 on food and 5.6 on wood; the item is obtained after
 $(500/0.4 + 300/0.61)/20 = 87$ s. One food is worth
 $1/(20 \times 0.4) = 0.125$ s, one wood $0.082$ s: food is worth 1.52 wood
 because it is slower to gather.
 
-**The value of a worker's time.** A unit of group $g$ working at $s$ saves
-$\lambda_k\, r_g(s)$ seconds of plan per second. Its best value
-$w_g = \max_s \lambda_{k(s)}\, r_g(s)$ is what a second of its labour is
-worth: the cost of taking it off work to build, walk or fight.
-
-**The market** turns resources into one another
-(`sim/components/Barter.js`). Selling 100 of $j$ gives
+**The market** (`sim/components/Barter.js`). Selling 100 of $j$ gives
 $100\, e_{jk}$ of $k$, with
 
 $$e_{jk} = \frac{100 - 10 + \delta_j}{100 + 10 + \delta_k}$$
 
-(the `truePrice` of every resource is 100, the player's `BarterMultiplier`
-is 1 unless a civ or a technology changes it). Each deal moves the price
-difference $\delta$ of the sold resource down and of the bought one up by
-$2\,e_{jk}$, and every $\delta$ returns toward 0 by 0.5 every 5 s. A deal is
-worth $100\,(e_{jk}\lambda_k - \lambda_j)$ seconds; at equal prices
-$e = 0.82$. Once a market exists, no deal is worth making exactly when
-$\lambda_k / \lambda_j \le 1 / e_{jk}$ for every pair: the market bounds the
-prices, it does not set them.
+(the `truePrice` of every resource is 100; the player's `BarterMultiplier`
+is 1 unless a civ or a technology changes it). Each deal lowers the price
+difference $\delta_j$ of the sold resource and raises $\delta_k$ by
+$2\,e_{jk}$, and every $\delta$ returns toward 0 by 0.5 every 5 s. In a
+period, the $n$-th deal of a pair is priced from the $\delta$ the earlier
+deals leave, after the return since $t_p$: a concave, piecewise-linear
+exchange. A deal adds $100\,(e_{jk}\lambda_k - \lambda_j)$ to $G$; at the
+optimum no deal left out has a positive value, so
+$\lambda_k / \lambda_j \le 1/e_{jk}$ for every pair: the market bounds the
+prices, it does not set them. At equal prices $e = 0.82$.
 
-## 6. The value of a decision
+## 6. Decisions
 
-Every economic decision $X$ is valued the same way: it is added to the plan
-where it would be made (as soon as possible, unless stated), the forecast
-is run again, and
+Every economic decision is a variable of the program, and its value is
+what it adds to $G$. A candidate not yet in the program is valued from the
+duals by its **reduced cost**: what one unit of it brings at the current
+prices (its effects on stock, labour, places, queues, population) minus
+what it costs at the same prices. Only candidates with a positive reduced
+cost enter the program, which is solved again; when no candidate is left
+with a positive reduced cost, the solution is optimal over all the
+candidates (column generation). Generating the candidates is the only
+search: the technologies available, the batch sizes, a house, a field, the
+production buildings, and dropsite sites at the legal positions next to the
+layers with the highest rent. How many sites are generated is a computing
+budget: it changes which options are seen, never what an option is worth.
 
-$$\Delta J(X) = J(P) - J(P \oplus X)$$
+**Example: two technologies** (long $\tau$). A gives +1.2 wood/s to the
+woodcutters for 100 metal and 120 s of research, B the same for 200 metal
+and 10 s. With metal at 2 and wood at 1.64 worker-seconds per unit, B
+yields $1.2 \times 110 \times 1.64 = 216$ more and costs
+$100 \times 2 = 200$ more: B is slightly better. If the plan needs no
+metal, $\lambda_{\text{metal}} = 0$ and B is clearly better. If A is
+researched at the civic centre, its 120 s are paid at $\kappa$ of that
+queue, the training of workers it delays.
 
-is its value in seconds, net of all its costs. $X$ is worth making when
-$\Delta J(X) > 0$.
+**Builders.** A building of build time $B$ that adds $b$ to $G$ per second
+once done (its rents and queue or population prices), built by $n$ workers
+of labour price $w$, costs $w B n^{1-m}$ of labour and $b B n^{-m}$ of
+waiting. The best crew is
 
-| Decision | What it changes in the forecast |
-|---|---|
-| train a unit, a batch of $b$ | a worker more after its training and walk; the batch time $t_1 b^\beta$ |
-| a dropsite at $p$ | the fronts (§3) |
-| a field at $p$ | a supply with $A=\infty$, $M = 5$, $\rho = 0.9$ (`sim/templates/template_structure_resource_field.xml`) |
-| a house | population capacity |
-| a technology | $\gamma$, $C$, $v$ or costs, from its `modifications` |
-| a production building | a queue |
-| $n$ builders on a building | its build time and their lost labour |
-| a barter deal | the stock, at $e_{jk}$ |
+$$n^* = \frac{m}{1-m}\,\frac{b}{w} = \frac{7}{3}\,\frac{b}{w} \quad (m = 0.7)$$
 
-**Example: two technologies.** A gives +1.2 wood/s to the woodcutters for
-100 metal and 120 s of research, B the same for 200 metal and 10 s. With
-metal at 2 and wood at 1.64 worker-seconds per unit ($N\lambda$, the
-labour the last unit costs), B yields $1.2 \times 110 \times 1.64 = 216$ more and costs
-$100 \times 2 = 200$ more: B is slightly better, whatever the horizon. If
-the plan waits for no metal, $\lambda_{\text{metal}} = 0$ and B is clearly
-better. If A is researched at the civic centre, its 120 s also stop the
-training of workers, and the forecast counts it.
+computed from the duals of the previous solution. A storehouse that brings
+10 woodcutters from 40 m to 10 m gives each $0.61 - 0.43 = 0.18$ wood/s
+more: $b/w = 10 \times 0.18 / 0.43 = 4.2$, so $n^* \approx 10$: the
+woodcutters build it themselves, in 8 s instead of 40.
 
-**Example: builders.** A building of build time $B$ that brings $b$ seconds
-of plan per second once done, built by $n$ workers each worth $w$, costs
-$w B n^{1-m}$ of labour and $b B n^{-m}$ of waiting. The best crew is
+## 7. Execution and assignment
 
-$$n^* = \frac{m}{1-m}\,\frac{b}{w} = \frac{7}{3}\,\frac{b}{w} \quad (m = 0.7).$$
+**What starts now.** The first period of the solution says what to start.
+A whole item the program starts in part (0.4 of a storehouse) is decided by
+solving twice, with that item started now and with it not started in the
+first period, and keeping the better; the same for the fractional part of
+a number of batches. This is exact for that choice. An item starts when the
+schedule says so and the engine allows it (stock, queue, population): the
+schedule is the only place resources are committed (README).
 
-A storehouse that brings 10 woodcutters from 40 m to 10 m gives each
-$0.61 - 0.43 = 0.18$ wood/s more: $b/w = 10 \times 0.18 / 0.43 = 4.2$, so
-$n^* \approx 10$. The woodcutters build it themselves, in 8 s instead of
-40.
-
-**Search.** At each decision the candidates of each kind are generated
-(the technologies available, the batch sizes, a house, the dropsite and
-field sites next to the supplies that lose the most to walking, the barter
-pairs), valued by $\Delta J$, and the best one with $\Delta J > 0$ is
-inserted into the plan; this repeats until none is left. The number of
-candidates looked at is a computing budget: it changes which options are
-seen, never what an option is predicted to do. Greedy insertion is not
-guaranteed optimal; its gap is measured against an exhaustive search on
-small plans (validation).
-
-## 7. Assignment
-
-The forecast says how many workers of each group work each resource now.
-The assignment says who goes where: each worker gets a place so as to
+**Who goes where.** The program says how many workers of each group work
+each layer now. The assignment gives each worker a supply so as to
 maximise
 
-$$\sum_u r_u(s_u)\,\big(W(s_u) - t_{\text{walk}}(u, s_u)\big)$$
+$$\sum_u r_u(s_u) \int_{t_{\text{walk}}(u, s_u)}^{W(s_u)} \lambda_{k(s_u)}(t)\, dt$$
 
-where $t_{\text{walk}}$ is the unit's walk to the place and $W(s)$ how long
-the place keeps its rate in the forecast (until its front moves past it or
-is exhausted, or the end of the plan). It is a transport problem (workers
-to places, $M_s$ places per supply), solved exactly.
+with those numbers per layer and $M_s$ places per supply, where
+$t_{\text{walk}}$ is the unit's walk to the supply and $W(s)$ the end of the
+time the program keeps working its layer. It is a transport problem,
+solved exactly. A busy worker is moved only when the gain exceeds what
+moving costs: its walk (in the integral) and the load it drops when it
+changes resource ($\lambda_k$ now times what it carries). A worker walking
+back loaded is moved once it has dropped its load, which costs nothing.
+These costs come from the model; no threshold keeps the assignment stable.
 
-A busy worker is moved only when the gain over $W$ exceeds what moving
-costs: its walk, and the load it would drop when it changes resource
-($\lambda_k$ times what it carries). A worker on its way back to a dropsite
-is moved when it has dropped its load, which costs nothing. These costs
-come from the model; no threshold is needed to keep the assignment stable.
+## 8. Computation
 
-## 8. Scope
+The program has, per period, one variable per group and layer, per item,
+per barter deal and per stock, and one row per stock, group, layer, queue
+kind and population. With 20 periods, 3 groups, 30 layers, 30 items and
+the barter pairs, about 3 000 variables and 800 rows: a revised simplex,
+warm-started from the previous basis, solved again when the state has
+changed (an item done, a layer exhausted, a unit gained or lost, a new
+candidate priced positive) and otherwise at the end of the first period.
+Between two solves, the schedule is executed as it is.
+
+The time per solve is measured on the `plan` scenario and kept within the
+decision budget (AGENTS.md, Performance). When it is exceeded, the grid,
+the layer bands and the site candidates are coarsened, which degrades the
+model only by the bounds stated in §3, §4 and §6.
+
+## 9. Scope
 
 Covered: trees, rocks, mines, bushes, fields, carcasses, fish (ships and
 docks are groups and dropsites like the others), treasures (a supply
 collected on arrival: its value is $\lambda_k A_s$ against the walk),
-resource trickles (a constant flow added to the stock, `ResourceTrickle`),
-barter.
+resource trickles, barter.
 
 Not yet covered, each to be submitted before it is added: hunting (kill
 and chase time before the carcass), corrals, trade between markets,
 tribute, loot, and the risk of a site near the enemy (a policy decides
 which sites are allowed).
 
-## 9. Neglected
+## 10. Neglected
 
 | Term | Size |
 |---|---|
-| The walk is a straight line; the path goes around obstructions | to measure (scenario `cycle`) |
+| The walk is a straight line; the path goes around obstructions | to measure (`cycle`) |
 | Time between a load and the next state of the unit (engine turns) | to measure (`cycle`) |
 | Congestion around a dropsite | to measure (`crowd`) |
-| Loads and workers are whole; the forecast treats them as a flow | at most one load per worker |
-| A front is used from the dropsite outward; gatherers actually take the supply nearest to them | to measure (`front`) |
-| Places are ranked by the rate of one group, then shared by all | to measure on mixed workforces (`front`) |
-| Greedy insertion of decisions | to measure against exhaustive search (`plan`) |
+| Items and workers are fractional in the program (only the first period is made whole, §7) | to measure: integrality gap against an exhaustive integer search on short plans (`plan`) |
+| An item's time is rounded to its period | at most the period's length |
+| A layer's rate is its mean distance's | at most the band width (§3) |
+| Field places as marginal gatherers, with the walk | exact at $d = 0$; to measure (`crowd`) |
+| The walk of workers moving between layers inside the program (the assignment prices it, §7) | to measure (`plan`) |
+| A building's labour is charged to the period it starts | at most its build time |
+| Technologies on the same rate add their gains instead of compounding | to measure on the gather technologies |
+| The return of barter prices between periods | to measure (`barter`) |
+| After a supply is exhausted the engine picks the next one itself, until the next decision | to measure (`front`) |
+| What lies beyond the grid | at most $e^{-t_P/\tau}$ of $G$ |
 
-## 10. Validation
+## 11. Validation
 
 Each scenario sets up the situation in the engine and compares the
 measured quantity with the model's prediction.
@@ -274,11 +314,11 @@ measured quantity with the model's prediction.
 |---|---|---|
 | `cycle` | one gatherer per unit group and supply type, $d$ from 2 to 100 m | $r_g(s, 1)$ |
 | `crowd` | $n$ gatherers on one field, one mine, one tree cluster; $n$ builders on one building | $\varphi_s(n)$; $B / n^m$ |
-| `front` | a woodline with a storehouse, 5 to 40 woodcutters, until exhaustion | $Q(t)$ from $d_f(Q)$ |
+| `front` | a woodline with a storehouse, 5 to 40 woodcutters, until exhaustion | the stock over time predicted by the program |
 | `train` | batches of 1 to 10 at each kind of building | $t_1 b^\beta \mu$ |
 | `barter` | a sequence of deals with pauses | $e_{jk}$ and $\delta(t)$ |
-| `plan` | a fixed plan from the start of a game against an idle player, on several maps | $T_i$ of the forecast, and $J$ against the exhaustive optimum on short plans |
+| `plan` | a fixed plan from the start of a game against an idle player, on several maps | the times of the program, $G$ against the integer optimum on short plans, the time per solve |
 
-The economy as a whole is measured on `plan`: the bot's $J$ against the
-forecast optimum for the same start, and against Louis's play of the same
+The economy as a whole is measured on `plan`: the bot's $G$ against the
+program's optimum for the same start, and against Louis's play of the same
 plan on the same maps.
