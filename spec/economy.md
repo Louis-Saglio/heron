@@ -165,9 +165,14 @@ $t_p$. Two linear expressions follow:
 
 **Unlocks are whole.** A phase, or any item that others require, is
 obtained entirely or not at all: a fraction of a phase unlocks nothing.
-Each unlock $r$ has a completion period, an integer, and the program is
-solved by branch and bound over these integers (a few unlocks over the
-grid), each node a linear program. Every other variable is continuous.
+The unlocks are the requirements of the plan's items and of the candidates
+in the program (phases, and every kind of building or technology one of
+them requires). Each has a completion period, an integer, and the program
+is solved by branch and bound over these integers, each node a linear
+program. Every other variable is continuous. The branch and bound runs
+within a node budget (§8) and reports its gap: the best whole schedule
+found against the bound of the relaxation. The schedule is optimal to
+within that gap, which is logged with every solve.
 
 **Objective.** Maximise the plan's worth
 
@@ -185,9 +190,12 @@ $$G = \sum_i v_i \sum_p y_{i,p}\, \tau\, e^{-(t_p + d_i)/\tau}$$
   between optimal vertices, and its duals are then not unique. Stability
   therefore comes from three properties of how the program is used, not
   from $G^*$:
-  1. the solve starts from the previous solution and the simplex moves
-     only to a strictly better one: while the previous schedule stays
-     optimal, it is kept (the fixed grid makes this possible);
+  1. the solve starts from the previous basis, which the fixed grid keeps
+     meaningful, and the simplex moves only to a strictly better one. The
+     real state always drifts from the forecast (whole loads, rate
+     errors), so the previous basis is usually no longer feasible and is
+     repaired by the dual simplex: that this keeps the schedule close to
+     the previous one is a hypothesis, measured by the prototype (§8);
   2. what is started is committed: it enters the next solves as part of
      the present, its cost paid;
   3. what can be undone at a cost — a worker's place — is moved only when
@@ -234,15 +242,20 @@ $100\, e_{jk}$ of $k$, with
 $$e_{jk} = \frac{100 - 10 + \delta_j}{100 + 10 + \delta_k}$$
 
 (the `truePrice` of every resource is 100; the player's `BarterMultiplier`
-is 1 unless a civ or a technology changes it). Each deal lowers the price
-difference $\delta_j$ of the sold resource and raises $\delta_k$ by
-$2 \times$ the amount bought $/100 = 2\,e_{jk}$ (`ExchangeResources`), and
-every $\delta$ returns toward 0 by 0.5 every 5 s (`ProgressTimeout`). The
+is 1 unless a civ or a technology changes it). A deal sells 100 or 500
+(`DEAL_AMOUNT`, `BATCH_SIZE` = 5), priced in full at the present $\delta$.
+It then lowers the price difference $\delta_j$ of the sold resource and
+raises $\delta_k$ by $2 \times$ the amount bought $/ 100$: $2\,e_{jk}$ for a
+deal of 100, $10\,e_{jk}$ for one of 500 (`ExchangeResources`; the change
+is based on the amount bought since commit 0b7323c096, "Fix market
+exploit by basing the price change on the amount purchased", which is in
+v0.28.0). A deal of 500 thus gets more than five deals of 100. Every
+$\delta$ returns toward 0 by 0.5 every 5 s (`ProgressTimeout`). The
 $\delta$ are **shared by all players**: `Barter` is a system component, so
 every player's deals move everyone's prices. The program prices the deals
-of a period from the present $\delta$, after their return since now: the
-$n$-th deal of a pair at the $\delta$ the earlier ones leave, a concave,
-piecewise-linear exchange. A deal adds $100\,(e_{jk}\lambda_k - \lambda_j)$ to
+of a period from the present $\delta$, after their return since now: deals
+of 500 first, then of 100, each at the $\delta$ the earlier ones leave, a
+concave, piecewise-linear exchange. A deal adds $100\,(e_{jk}\lambda_k - \lambda_j)$ to
 $G$; at the optimum no deal left out has a positive value, so
 $\lambda_k / \lambda_j \le 1/e_{jk}$ for every pair: the market bounds the
 prices, it does not set them. At equal prices $e = 0.82$.
@@ -270,7 +283,10 @@ highest rent — and enter the program by **column generation**:
   improve the plan and is left out.
 - Candidates with a positive reduced cost or bound enter the program,
   which is solved again; when none is left, the solution is optimal over
-  all the candidates.
+  all the candidates for the unlock dates of the final node of the branch
+  and bound. A candidate left out at those duals could be useful with
+  other unlock dates; how often is measured by the prototype, with every
+  candidate in the program.
 
 How many sites are generated is a computing budget: it changes which
 options are seen, never what an option is worth.
@@ -300,9 +316,14 @@ woodcutters build it themselves, in 8 s instead of 40.
 
 **What starts now.** The first period of the solution says what to start.
 A whole item the program starts in part (0.4 of a storehouse) is decided by
-solving twice, with that item started now and with it not started in the
-first period, and keeping the better; the same for the fractional part of
-a number of batches. This is exact for that choice. An item starts when the
+solving twice, and the item is whole in both: started now, or started
+whole in a later period, that period an integer found by the branch and
+bound like an unlock's. Leaving it fractional in the second solve would
+compare a whole purchase now with a cheaper fractional one later, and
+deferring would win every time (a fraction of a technology or a dropsite
+gets more than its share of the gain through the bounds $\bar e\,Y_T$ and
+$M_\ell\,Y_D$). The same holds for the fractional part of a number of
+batches. An item starts when the
 schedule says so and the engine allows it (stock, queue, population): the
 schedule is the only place resources are committed (README). Once
 started, it is part of the present (§4).
@@ -340,16 +361,25 @@ resource each:
 A column of $x$ has about five non-zeros (stock, labour, places, amounts,
 technology): the matrix is very sparse, and dense storage (about 5 million
 entries) is out of the question. The solver is a sparse revised simplex,
-warm-started from the previous basis, run again when the state has changed
+warm-started from the previous basis (dual simplex when the drift of the
+state has made it infeasible), run again when the state has changed
 (an item done, a layer exhausted, a unit gained or lost, a candidate priced
 positive) and otherwise when the first period ends. Between two solves,
 the schedule is executed as it is.
 
+**Number of solves.** A decision takes one linear program per node of the
+branch and bound over the unlocks, and two whole solves per fractional
+first-period item (§7), each a branch and bound of its own. The node budget
+bounds the total; the gap it leaves is reported (§4).
+
 **Before the bot.** The program is first built and solved outside the
 engine (`tools/`, with an existing solver) on states dumped from real
 games, to measure what this specification can only estimate: its real
-size, the time per solve, the integrality gap, and how much the solution
-moves between successive solves. The solver in the bot is written after.
+size, the time per solve, the number of nodes the unlocks need and the gap
+at a given budget, the integrality gap of the other items, how often a
+candidate left out at the final node's duals would have been useful, and
+how much the schedule moves between successive solves. The solver in the
+bot is written after.
 
 The time per solve is kept within the decision budget (AGENTS.md,
 Performance). When it is exceeded, the grid, the layer bands and the site
@@ -375,7 +405,9 @@ which sites are allowed).
 | The walk is a straight line; the path goes around obstructions | to measure (`cycle`) |
 | Time between a load and the next state of the unit (engine turns) | to measure (`cycle`) |
 | Congestion around a dropsite | to measure (`crowd`) |
-| Items other than unlocks are fractional beyond the first period: large purchases far ahead, and today's prices, are optimistic | to measure: integrality gap against an integer solve (prototype, `plan`) |
+| Items other than unlocks are fractional beyond the first period: large purchases far ahead, and today's prices, are optimistic (a fraction of a technology or a dropsite gets more than its share through $\bar e\,Y_T$ and $M_\ell\,Y_D$); the bias is the same in both solves of §7 | to measure: integrality gap against an integer solve (prototype, `plan`) |
+| Candidates are priced at the duals of the final node only | to measure (prototype, every candidate in the program) |
+| The branch and bound stops at its node budget | its gap, logged with every solve |
 | An item's time is rounded to its period | at most the period's length |
 | A layer's rate is its mean distance's | at most the band width (§3) |
 | The places of small supplies disappear in proportion to what is left, not supply by supply | to measure (`front`) |
